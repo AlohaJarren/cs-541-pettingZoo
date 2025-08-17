@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
 import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
 from pettingzoo.classic import rps_v2
 from stable_baselines3 import PPO
@@ -23,12 +24,36 @@ def masked_random_action(action_mask: np.ndarray) -> int:
         return 0
     return int(np.random.choice(valid))
 
+def get_mask(o) -> np.ndarray:
+    if isinstance(o, dict):
+        m = o.get("action_mask", None)
+        if m is None:
+            return np.ones(3, dtype=np.float32)
+        return np.array(m, dtype=np.float32).flatten()
+    return np.ones(3, dtype=np.float32)
+
+def encode_obs(o) -> np.ndarray:
+    if isinstance(o, dict):
+        obs = np.array(o.get("observation", []), dtype=np.float32).flatten()
+        if obs.size != 3:
+            obs = np.zeros(3, dtype=np.float32)
+        mask = get_mask(o)
+        if mask.size != 3:
+            mask = np.ones(3, dtype=np.float32)
+        return np.concatenate([obs, mask]).astype(np.float32)
+    return np.concatenate([np.zeros(3, dtype=np.float32), np.ones(3, dtype=np.float32)]).astype(np.float32)
+
+def pz_reset(env, seed=None):
+    res = env.reset(seed=seed)
+    if isinstance(res, tuple):
+        return res[0], res[1]
+    return res, {}
 @dataclass
 class BiasedOpponent:
     probs: Tuple[float, float, float]
 
     def __call__(self, obs: Dict[str, np.ndarray]) -> int:
-        mask = obs["action_mask"]
+        mask = get_mask(obs)
         a = int(np.random.choice([0, 1, 2], p=self.probs))
         return a if mask[a] == 1 else masked_random_action(mask)
 
@@ -37,8 +62,9 @@ class ModelOpponent:
     model: PPO
 
     def __call__(self, obs: Dict[str, np.ndarray]) -> int:
-        action, _ = self.model.predict(obs, deterministic=True)
-        return int(action)
+        a, _ = self.model.predict(encode_obs(obs), deterministic=True)
+        return int(a)
+
 
 class SelfPlayRPS(gym.Env):
     metadata = {"render_modes": []}
@@ -49,10 +75,10 @@ class SelfPlayRPS(gym.Env):
         self.opponent_agent = "player_1" if learning_agent == "player_0" else "player_0"
         self.seed = seed
         self._env = rps_v2.parallel_env()
-        self.observation_space = self._env.observation_space(self.learning_agent)
-        self.action_space = self._env.action_space(self.learning_agent)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(6,), dtype=np.float32)
+        self.action_space = spaces.Discrete(3)
         if opponent_policy is None:
-            self._opponent_policy = lambda obs: masked_random_action(obs["action_mask"]) 
+            self._opponent_policy = lambda o: masked_random_action(get_mask(o))
         else:
             self._opponent_policy = opponent_policy
         self._obs = None
@@ -60,9 +86,9 @@ class SelfPlayRPS(gym.Env):
     def reset(self, seed: Optional[int] = None, options=None):
         if seed is None:
             seed = self.seed
-        obs = self._env.reset(seed=seed)
+        obs, _info = pz_reset(self._env, seed=seed)
         self._obs = obs
-        return obs[self.learning_agent], {}
+        return encode_obs(obs[self.learning_agent]), {}
 
     def step(self, action: int):
         opp_obs = self._obs[self.opponent_agent]
@@ -73,10 +99,11 @@ class SelfPlayRPS(gym.Env):
         done = bool(terms[self.learning_agent] or truncs[self.learning_agent])
         rew = float(rewards[self.learning_agent])
         info = infos.get(self.learning_agent, {})
-        return obs[self.learning_agent], rew, done, False, info
+        return encode_obs(obs[self.learning_agent]), rew, done, False, info
+
 
 def train_agent(env: gym.Env, timesteps: int, lr: float = 3e-4, seed: int = 42) -> PPO:
-    policy = "MultiInputPolicy"
+    policy = "MlpPolicy"
     model = PPO(policy, env, verbose=0, learning_rate=lr, n_steps=64, batch_size=64, seed=seed)
     model.learn(total_timesteps=timesteps, progress_bar=False)
     return model
@@ -86,11 +113,11 @@ def play_matches(model_A: PPO, model_B: PPO, episodes: int = 500, seed: int = 12
     wins = draws = losses = 0
     rng = np.random.RandomState(seed)
     for _ in range(episodes):
-        obs = env.reset(seed=int(rng.randint(0, 1_000_000_000)))
+        obs, _info = pz_reset(env, seed=int(rng.randint(0, 1_000_000_000)))
         doneA = doneB = False
         while not (doneA or doneB):
-            a0, _ = model_A.predict(obs["player_0"], deterministic=True)
-            a1, _ = model_B.predict(obs["player_1"], deterministic=True)
+            a0, _ = model_A.predict(encode_obs(obs["player_0"]), deterministic=True)
+            a1, _ = model_B.predict(encode_obs(obs["player_1"]), deterministic=True)
             obs, rewards, terms, truncs, _ = env.step({"player_0": int(a0), "player_1": int(a1)})
             doneA = bool(terms["player_0"] or truncs["player_0"])
             doneB = bool(terms["player_1"] or truncs["player_1"])
