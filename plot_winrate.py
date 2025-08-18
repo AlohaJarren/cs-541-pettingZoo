@@ -4,9 +4,9 @@ import matplotlib.pyplot as plt
 
 def main():
     parser = argparse.ArgumentParser(description="plot winrate")
-    parser.add_argument("--file", type=str, default="models/B_winrate_vs_A.txt")
+    parser.add_argument("--file", type=str, default="models/switch_history.txt")
     parser.add_argument("--steps-per-burst", type=int, default=5000)
-    parser.add_argument("--out", type=str, default="models/B_winrate_vs_A.png")
+    parser.add_argument("--out", type=str, default="models/switch_history.png")
     args = parser.parse_args()
 
     y = np.loadtxt(args.file)
